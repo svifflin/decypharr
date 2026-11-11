@@ -18,6 +18,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/logger"
+	"github.com/sirrobot01/decypharr/internal/request"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/arr"
 	"github.com/sirrobot01/decypharr/pkg/arr/reacquire"
@@ -49,6 +50,9 @@ type Manager struct {
 	ready        chan struct{}
 	readyOnce    sync.Once
 	streamClient *http.Client
+	// debridStreamClients holds per-provider streaming clients so a provider
+	// proxy only applies to that provider's download links.
+	debridStreamClients *xsync.Map[string, *http.Client]
 
 	arrRecoveryMu          sync.RWMutex
 	arrRecovery            ArrRecovery
@@ -139,36 +143,7 @@ func New() *Manager {
 	// Initialize debrid registry
 	ctx := context.Background()
 
-	// Optimized transport for high-performance streaming with HTTP/2 multiplexing
-	// DNS resolver with caching
-	dialer := &net.Dialer{
-		Timeout:   5 * time.Second,  // Fast connection timeout
-		KeepAlive: 30 * time.Second, // Keep connections alive
-	}
-
-	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true,
-			MinVersion:         tls.VersionTLS12,
-			ClientSessionCache: tls.NewLRUClientSessionCache(200),
-		},
-		TLSHandshakeTimeout:    20 * time.Second,
-		MaxIdleConns:           1000,
-		MaxIdleConnsPerHost:    500,
-		MaxConnsPerHost:        500,
-		IdleConnTimeout:        120 * time.Second,
-		DisableCompression:     false, // Enable compression for better multiplexing
-		DialContext:            dialer.DialContext,
-		Proxy:                  http.ProxyFromEnvironment,
-		MaxResponseHeaderBytes: 1 << 20,   // 1MB header buffer for CDN responses
-		WriteBufferSize:        32 << 10,  // requests are tiny
-		ReadBufferSize:         256 << 10, // caps how much a single body.Read can return
-	}
-
-	streamClient := &http.Client{
-		Timeout:   0,
-		Transport: transport,
-	}
+	streamClient := newStreamClient("")
 
 	usenetTimeout, err := utils.ParseDuration(cfg.Usenet.ProcessingTimeout)
 	if err != nil {
@@ -186,6 +161,7 @@ func New() *Manager {
 		ctx:                    ctx,
 		ready:                  make(chan struct{}),
 		streamClient:           streamClient,
+		debridStreamClients:    xsync.NewMap[string, *http.Client](),
 		usenetTimeout:          usenetTimeout,
 		debridSpeedTestResults: xsync.NewMap[string, debridTypes.SpeedTestResult](),
 		activeStreams:          xsync.NewMap[string, *ActiveStream](),
@@ -197,6 +173,63 @@ func New() *Manager {
 
 	// Create migrator
 	return instance
+}
+
+// newStreamTransport builds the transport used for provider download traffic.
+// Proxy selection is applied by newStreamClient so each debrid can use its own.
+func newStreamTransport() *http.Transport {
+	dialer := &net.Dialer{
+		Timeout:   5 * time.Second,  // Fast connection timeout
+		KeepAlive: 30 * time.Second, // Keep connections alive
+	}
+
+	return &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+			MinVersion:         tls.VersionTLS12,
+			ClientSessionCache: tls.NewLRUClientSessionCache(200),
+		},
+		TLSHandshakeTimeout:    20 * time.Second,
+		MaxIdleConns:           1000,
+		MaxIdleConnsPerHost:    500,
+		MaxConnsPerHost:        500,
+		IdleConnTimeout:        120 * time.Second,
+		DisableCompression:     false, // Enable compression for better multiplexing
+		DialContext:            dialer.DialContext,
+		MaxResponseHeaderBytes: 1 << 20,   // 1MB header buffer for CDN responses
+		WriteBufferSize:        32 << 10,  // requests are tiny
+		ReadBufferSize:         256 << 10, // caps how much a single body.Read can return
+	}
+}
+
+// newStreamClient builds a streaming client. An empty proxy keeps the previous
+// behaviour of consulting HTTP(S)_PROXY from the environment.
+func newStreamClient(proxy string) *http.Client {
+	transport := newStreamTransport()
+	request.SetProxy(transport, proxy)
+	return &http.Client{
+		Timeout:   0,
+		Transport: transport,
+	}
+}
+
+// streamClientFor returns the HTTP client used for a provider's download
+// links. A provider with its own proxy gets a dedicated client so only its
+// traffic is proxied; the others share the environment-configured client.
+func (m *Manager) streamClientFor(provider string) *http.Client {
+	if provider == "" || m.debridStreamClients == nil || m.clients == nil {
+		return m.streamClient
+	}
+	if client, ok := m.debridStreamClients.Load(provider); ok {
+		return client
+	}
+	debridClient, ok := m.clients.Load(provider)
+	if !ok || debridClient.Config().Proxy == "" {
+		return m.streamClient
+	}
+	client := newStreamClient(debridClient.Config().Proxy)
+	m.debridStreamClients.Store(provider, client)
+	return client
 }
 
 func (m *Manager) init() {
@@ -227,6 +260,8 @@ func (m *Manager) init() {
 
 	// Clear debrid clients so they get recreated with new config
 	m.clients = xsync.NewMap[string, debrid.Client]()
+	// Provider proxies may have changed; rebuild streaming clients lazily.
+	m.debridStreamClients = xsync.NewMap[string, *http.Client]()
 
 	// Reset ready channel and syncTorrents.Once for the next start
 	m.ready = make(chan struct{})
@@ -337,6 +372,7 @@ func (m *Manager) initLinkService() {
 		m.ReinsertEntry,
 		func(entry *storage.Entry) error { return m.AddOrUpdate(entry, nil) },
 		m.streamClient,
+		m.streamClientFor,
 		m.config.Retries,
 		logger.New("link"),
 	)

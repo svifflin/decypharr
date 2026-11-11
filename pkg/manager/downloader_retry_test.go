@@ -41,7 +41,7 @@ func TestLocalDownloaderRetriesServiceUnavailable(t *testing.T) {
 		},
 		logger: zerolog.Nop(),
 	}
-	if err := d.localDownloader(context.Background(), server.URL, destination, nil, func(delta, _ int64) {
+	if err := d.localDownloader(context.Background(), d.manager.streamClient, server.URL, destination, nil, func(delta, _ int64) {
 		downloaded.Add(delta)
 	}); err != nil {
 		t.Fatalf("localDownloader() error = %v", err)
@@ -115,7 +115,7 @@ func TestLocalDownloaderResumesAfterUnexpectedEOF(t *testing.T) {
 		},
 		logger: zerolog.Nop(),
 	}
-	if err := d.localDownloader(context.Background(), "https://cdn.example/release.mkv", destination, nil, func(delta, _ int64) {
+	if err := d.localDownloader(context.Background(), client, "https://cdn.example/release.mkv", destination, nil, func(delta, _ int64) {
 		downloaded.Add(delta)
 	}); err != nil {
 		t.Fatalf("localDownloader() error = %v", err)

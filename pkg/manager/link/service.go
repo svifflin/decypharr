@@ -42,6 +42,7 @@ type Service struct {
 	repairer       EntryRepairer
 	entrySaver     EntrySaver
 	httpClient     *http.Client
+	clientFor      func(provider string) *http.Client
 	retries        int
 	logger         zerolog.Logger
 }
@@ -53,6 +54,7 @@ func New(
 	entryReinsert EntryRepairer,
 	entrySaver EntrySaver,
 	httpClient *http.Client,
+	clientFor func(provider string) *http.Client,
 	retries int,
 	logger zerolog.Logger,
 ) *Service {
@@ -63,6 +65,7 @@ func New(
 		repairer:       entryReinsert,
 		entrySaver:     entrySaver,
 		httpClient:     httpClient,
+		clientFor:      clientFor,
 		retries:        retries,
 		logger:         logger,
 	}
@@ -377,6 +380,13 @@ func (s *Service) validateLink(ctx context.Context, link *types.DownloadLink) er
 		return NewPermanentError(fmt.Errorf("download url is empty for %s||%s", link.Filename, link.Link), "empty_link")
 	}
 
+	client := s.httpClient
+	if s.clientFor != nil {
+		if c := s.clientFor(link.Debrid); c != nil {
+			client = c
+		}
+	}
+
 	req, err := http.NewRequestWithContext(ctx, "HEAD", link.DownloadLink, nil)
 	if err != nil {
 		return NewPermanentError(
@@ -385,7 +395,7 @@ func (s *Service) validateLink(ctx context.Context, link *types.DownloadLink) er
 		)
 	}
 
-	resp, err := s.httpClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return NewRetryableError(
 			fmt.Errorf("HEAD request failed: %w", err),

@@ -535,6 +535,7 @@ func (d *Downloader) processTorrentDownload(ctx context.Context, entry *storage.
 		p.Go(func() error {
 			if err := d.localDownloader(
 				ctx,
+				d.manager.streamClientFor(entry.ActiveProvider),
 				task.link,
 				filepath.Join(downloadedFolder, task.file.Name),
 				task.file.ByteRange,
@@ -714,13 +715,14 @@ func (d *Downloader) detectMultiSeason(torrent *storage.Entry) (bool, []SeasonIn
 // localDownloader downloads a file with grab and retries transient failures.
 // Each attempt observes the same destination, allowing grab to resume from the
 // partial file instead of restarting a large transfer after a CDN interruption.
-func (d *Downloader) localDownloader(ctx context.Context, downloadURL, filename string, byterange *[2]int64, progressCallback func(int64, int64)) error {
+// httpClient carries the provider's proxy when it has one.
+func (d *Downloader) localDownloader(ctx context.Context, httpClient *http.Client, downloadURL, filename string, byterange *[2]int64, progressCallback func(int64, int64)) error {
 	delay := config.DefaultRetryDelay
 	reported := int64(0)
 	var lastErr error
 
 	for attempt := 1; attempt <= localDownloadMaxAttempts; attempt++ {
-		err := d.localDownloadAttempt(ctx, downloadURL, filename, byterange, func(completed, speed int64) {
+		err := d.localDownloadAttempt(ctx, httpClient, downloadURL, filename, byterange, func(completed, speed int64) {
 			if progressCallback != nil && completed != reported {
 				progressCallback(completed-reported, speed)
 			}
@@ -752,7 +754,7 @@ func (d *Downloader) localDownloader(ctx context.Context, downloadURL, filename 
 	return fmt.Errorf("local download failed after retries: %w", lastErr)
 }
 
-func (d *Downloader) localDownloadAttempt(ctx context.Context, downloadURL, filename string, byterange *[2]int64, progressCallback func(int64, int64)) error {
+func (d *Downloader) localDownloadAttempt(ctx context.Context, httpClient *http.Client, downloadURL, filename string, byterange *[2]int64, progressCallback func(int64, int64)) error {
 	startTime := time.Now()
 	requestedRange := "full"
 	req, err := grab.NewRequest(filename, downloadURL)
@@ -773,7 +775,7 @@ func (d *Downloader) localDownloadAttempt(ctx context.Context, downloadURL, file
 
 	client := grab.NewClient()
 	client.BufferSize = 1 << 20
-	client.HTTPClient = d.manager.streamClient
+	client.HTTPClient = httpClient
 
 	resp := client.Do(req)
 	if resp == nil {

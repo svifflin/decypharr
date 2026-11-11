@@ -725,7 +725,7 @@ func (m *Manager) openSession(ctx context.Context, entry *storage.Entry, filenam
 		}
 	} else {
 		ht := &httpTransport{
-			client: m.streamClient,
+			client: m.streamClientFor(entry.ActiveProvider),
 			getLink: func(ctx context.Context) (types.DownloadLink, error) {
 				return m.linkService.GetLink(ctx, entry, filename)
 			},

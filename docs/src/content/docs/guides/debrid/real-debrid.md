@@ -86,6 +86,13 @@ Route requests through a proxy:
 }
 ```
 
+The proxy applies to the provider's API calls, link validation, and file
+transfers (WebDAV, `/stream` in `proxy` delivery mode, and local downloads).
+Each provider keeps its own proxy, so a mixed setup can route one debrid through
+a VPN proxy and leave the others direct. Providers without a `proxy` still honor
+`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`; remove those environment variables when
+you want unproxied providers to connect directly.
+
 ### Torrent Slot Management
 
 Set minimum free slots before using this provider:
